@@ -17,11 +17,12 @@
 #include <ctype.h>
 #include <iostream>
 #include <iomanip>
-#include <fstream>
+//#include <fstream>
 #include <string>
 
 #include <dlfcn.h>
 #include <assert.h>
+#include <sstream>
 
 
 #include <stdio.h>
@@ -101,7 +102,20 @@ int MemoryTrace::signalNumberFromString(const char* signame)
 	else
 		return atoi(signame);
 }
+static Dl_info s_P2pSODlInfo;
 
+_Unwind_Reason_Code Unwind_Trace_Fn(_Unwind_Context *context, void *hnd) {
+    struct TraceHandle *traceHanle = (struct TraceHandle *) hnd;
+    _Unwind_Word ip = _Unwind_GetIP(context);
+    if (traceHanle->pos != ALLOCATION_STACK_DEPTH) {
+        traceHanle->backtrace[traceHanle->pos] = (void *) (ip - (_Unwind_Word) s_P2pSODlInfo.dli_fbase);
+//        ALOG("s_P2pSODlInfo, dli_fbase  222    = %p, dli_fname = %s, dli_saddr = %p, dli_sname = %s",
+//             s_P2pSODlInfo.dli_fbase, s_P2pSODlInfo.dli_fname, s_P2pSODlInfo.dli_saddr, s_P2pSODlInfo.dli_sname);
+        ++traceHanle->pos;
+        return _URC_NO_REASON;
+    }
+    return _URC_END_OF_STACK;
+}
 void
 MemoryTrace::init_no_alloc_allowed()
 {
@@ -114,12 +128,17 @@ MemoryTrace::init_no_alloc_allowed()
 			if (curfunc->libcsymbol) {
 				*curfunc->localredirect = curfunc->libcsymbol;
 			} else {
-				*curfunc->localredirect = dlsym(RTLD_NEXT, curfunc->symbname); 
+				*curfunc->localredirect = dlsym(RTLD_NEXT, curfunc->symbname);
 			}
 		}
-	} 
+	}
+    dladdr((const void*)init_no_alloc_allowed, &s_P2pSODlInfo);
+    ALOG("s_P2pSODlInfo, dli_fbase = %p, dli_fname = %s, dli_saddr = %p, dli_sname = %s",
+         s_P2pSODlInfo.dli_fbase, s_P2pSODlInfo.dli_fname, s_P2pSODlInfo.dli_saddr, s_P2pSODlInfo.dli_sname);
+
 
 	__instance = reinterpret_cast<MemoryTrace*>(&s_memoryTrace_instance);
+
 
 	// we're using a c++ placement to initialized the MemoryTrace object living in the data section
 	new (__instance) MemoryTrace();
@@ -354,18 +373,18 @@ void MemoryTrace::writeLeaksToFile(const char* reportFilename)
 {
 	MutexLock lock(__allocations_mutex);
 	InternalMonitoringDisablerThreadUp();
+	std::stringbuf  buf;
+    std::ostream oleaks(&buf);
+    writeLeaksPrivate(oleaks);
 
-	std::ofstream oleaks;
-	oleaks.open(reportFilename, std::ios_base::out);
-	if (oleaks.is_open())
-	{
-		writeLeaksPrivate(oleaks);
-		oleaks.close();
-	}
-	else
-	{
-		std::cerr << "Failed to write to \"" << reportFilename << "\"\n";
-	}
+    FILE *handle_ = fopen(reportFilename,"wb");;
+    if (NULL == handle_) {
+        return;
+    }
+    oleaks.flush();
+    fprintf(handle_,"%s", buf.str().c_str());
+    fflush(handle_);
+    fclose(handle_);
 	InternalMonitoringDisablerThreadDown();
 }
 

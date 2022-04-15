@@ -25,10 +25,16 @@
 #include <execinfo.h>
 #endif
 
+#include <unwind.h>
+#include <dlfcn.h>
 
 #include "Mutex.hpp"
 #include "MutexLock.hpp"
 #include "MapMemoryInfo.hpp"
+
+#include <jni.h>
+#include <android/log.h>
+#define ALOG(...) __android_log_print(ANDROID_LOG_INFO, "kcglog", __VA_ARGS__)
 
 
 /////////////////////////////////////////////////////////////
@@ -57,9 +63,14 @@
 #include "LeakTracer_l.hpp"
 
 
+
 namespace leaktracer {
 
-
+struct TraceHandle {
+    void **backtrace;
+    int pos;
+};
+_Unwind_Reason_Code Unwind_Trace_Fn(_Unwind_Context *context, void *hnd);
 /**
  * Main class to trace memory allocations
  * and releases.
@@ -311,36 +322,45 @@ inline void MemoryTrace::stopAllMonitoring(void)
 	__monitoringReleases = false;
 }
 
-
-// stores allocation stack, up to ALLOCATION_STACK_DEPTH
+    // stores allocation stack, up to ALLOCATION_STACK_DEPTH
 // frames
 inline void MemoryTrace::storeAllocationStack(void* arr[ALLOCATION_STACK_DEPTH])
 {
-	unsigned int iIndex = 0;
-#ifdef USE_BACKTRACE
-	void* arrtmp[ALLOCATION_STACK_DEPTH+1];
-	iIndex = backtrace(arrtmp, ALLOCATION_STACK_DEPTH + 1) - 1;
-	memcpy(arr, &arrtmp[1], iIndex*sizeof(void*));
-#else
-	void *pFrame;
-	// NOTE: we can't use "for" loop, __builtin_* functions
-	// require the number to be known at compile time
-	arr[iIndex++] = (                  (pFrame = __builtin_frame_address(0)) != NULL) ? __builtin_return_address(0) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
-	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(1)) != NULL) ? __builtin_return_address(1) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
-	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(2)) != NULL) ? __builtin_return_address(2) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
-	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(3)) != NULL) ? __builtin_return_address(3) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
-	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(4)) != NULL) ? __builtin_return_address(4) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
-	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(5)) != NULL) ? __builtin_return_address(5) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
-	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(6)) != NULL) ? __builtin_return_address(6) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
-	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(7)) != NULL) ? __builtin_return_address(7) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
-	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(8)) != NULL) ? __builtin_return_address(8) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
-	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(9)) != NULL) ? __builtin_return_address(9) : NULL;
-#endif
-	// fill remaining spaces
-	for (; iIndex < ALLOCATION_STACK_DEPTH; iIndex++)
-		arr[iIndex] = NULL;
-}
+//	unsigned int iIndex = 0;
+//#ifdef USE_BACKTRACE
+//	void* arrtmp[ALLOCATION_STACK_DEPTH+1];
+//	iIndex = backtrace(arrtmp, ALLOCATION_STACK_DEPTH + 1) - 1;
+//	memcpy(arr, &arrtmp[1], iIndex*sizeof(void*));
+//#else
+//	void *pFrame;
+//	// NOTE: we can't use "for" loop, __builtin_* functions
+//	// require the number to be known at compile time
+//	arr[iIndex++] = (                  (pFrame = __builtin_frame_address(0)) != NULL) ? __builtin_return_address(0) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
+//	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(1)) != NULL) ? __builtin_return_address(1) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
+//	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(2)) != NULL) ? __builtin_return_address(2) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
+//	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(3)) != NULL) ? __builtin_return_address(3) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
+//	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(4)) != NULL) ? __builtin_return_address(4) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
+//	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(5)) != NULL) ? __builtin_return_address(5) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
+//	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(6)) != NULL) ? __builtin_return_address(6) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
+//	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(7)) != NULL) ? __builtin_return_address(7) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
+//	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(8)) != NULL) ? __builtin_return_address(8) : NULL; if (iIndex == ALLOCATION_STACK_DEPTH) return;
+//	arr[iIndex++] = (pFrame != NULL && (pFrame = __builtin_frame_address(9)) != NULL) ? __builtin_return_address(9) : NULL;
+//#endif
+//	// fill remaining spaces
+//	for (; iIndex < ALLOCATION_STACK_DEPTH; iIndex++)
+//		arr[iIndex] = NULL;
 
+        unsigned int iIndex = 0;
+
+        TraceHandle traceHandle;
+        traceHandle.backtrace = arr;
+        traceHandle.pos = 0;
+        _Unwind_Backtrace(Unwind_Trace_Fn, &traceHandle);
+
+        // fill remaining spaces
+        for (iIndex = traceHandle.pos; iIndex < ALLOCATION_STACK_DEPTH; iIndex++)
+            arr[iIndex] = NULL;
+}
 
 // adds all relevant info regarding current allocation to map
 inline void MemoryTrace::registerAllocation(void *p, size_t size, bool is_array)
